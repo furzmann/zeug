@@ -1,0 +1,181 @@
+//TODO: queue + pickaxe zeug
+public class DoubleMine extends Module {
+    public static DoubleMine INSTANCE = new DoubleMine();
+    private Action primary = null;
+    private Action secondary = null;
+
+    public DoubleMine() {
+        super("Double Mine", "dmine", "", Category.PLAYER);
+    }
+
+    @Override
+    public void onDisable() {
+        super.onDisable();
+        if (primary != null) {
+            primary.cancel();
+            primary = null;
+        }
+        if (secondary != null) {
+            secondary.cancel();
+            secondary = null;
+        }
+    }
+
+    @EventHandler
+    public void onAttackBlock(StartBreakingBlockEvent event) {
+        if (mc.player == null || mc.world == null) return;
+
+        if (handleMining(event.blockPos)) {
+            event.cancel();
+        }
+    }
+
+    @EventHandler
+    public void onTick() {
+        super.onTick();
+        if (mc.player == null || mc.world == null) return;
+
+        if (secondary != null && secondary.process()) {
+            secondary = null;
+        }
+
+        if (primary != null && primary.process()) {
+            primary = null;
+        }
+    }
+
+    private boolean handleMining(BlockPos position) {
+        if (mc.interactionManager.getCurrentGameMode() == GameMode.CREATIVE ||
+                mc.interactionManager.getCurrentGameMode() == GameMode.SPECTATOR) return false;
+
+        BlockState state = mc.world.getBlockState(position);
+        if (state.isAir() || state.getBlock().getHardness() == -1) return false;
+
+        if (mc.player.getEyePos().squaredDistanceTo(Vec3d.ofCenter(position)) > MathHelper.square(6.0)) return false;
+
+        if ((primary != null && primary.getPosition().equals(position)) ||
+                (secondary != null && secondary.getPosition().equals(position))) {
+            return true;
+        }
+
+        if (primary == null) {
+            primary = new Action(position);
+        } else if (secondary == null) {
+            secondary = new Action(position);
+        } else {
+            if (secondary.getProgress() < primary.getProgress()) {
+                secondary = new Action(position);
+            } else {
+                primary = new Action(position);
+            }
+        }
+
+        return true;
+    }
+
+    public class Action {
+        private final BlockPos position;
+        private BlockState state;
+        private float progress;
+        private boolean mining;
+
+        public Action(BlockPos position) {
+            this.position = position;
+            this.state = mc.world.getBlockState(position);
+            this.progress = 0.0f;
+            this.mining = false;
+            start();
+        }
+
+        public boolean process() {
+            if (mc.player.getEyePos().squaredDistanceTo(Vec3d.ofCenter(position)) > MathHelper.square(6.0) || mc.world.getBlockState(position).isAir()) {
+                cancel();
+                return true;
+            }
+
+            Direction direction = getClosestDirection(position);
+            BlockState currentState = mc.world.getBlockState(position);
+
+            if (!currentState.isAir() && currentState.getBlock() != this.state.getBlock()) {
+                this.state = currentState;
+            }
+
+            if (mining) {
+                float delta = getMS(this.state);
+
+                progress = MathHelper.clamp(progress + delta, 0.0f, 1.0f);
+
+                if (progress >= 1.0f && !currentState.isAir()) {
+                    mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(
+                            PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, position, direction));
+                    mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(Hand.MAIN_HAND));
+
+                    return true;
+                }
+            } else {
+                start();
+            }
+
+            return false;
+        }
+
+        public void start() {
+            Direction direction = getClosestDirection(position);
+
+            mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(
+                    PlayerActionC2SPacket.Action.START_DESTROY_BLOCK, position, direction));
+            mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(
+                    PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, position, direction));
+
+            mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(Hand.MAIN_HAND));
+
+            progress = 0.0f;
+            this.mining = true;
+        }
+
+        public void cancel() {
+            if (mining) {
+                Direction direction = getClosestDirection(position);
+                mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(
+                        PlayerActionC2SPacket.Action.ABORT_DESTROY_BLOCK, position, direction));
+                mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(Hand.MAIN_HAND));
+            }
+
+            progress = 0.0f;
+            this.mining = false;
+        }
+
+        public BlockPos getPosition() { return position; }
+        public float getProgress() { return progress; }
+    }
+
+    private Direction getClosestDirection(BlockPos position) {
+        Vec3d playerPos = mc.player.getEyePos();
+        Vec3d blockCenter = Vec3d.ofCenter(position);
+        Vec3d diff = blockCenter.subtract(playerPos);
+
+        double absX = Math.abs(diff.x);
+        double absY = Math.abs(diff.y);
+        double absZ = Math.abs(diff.z);
+
+        if (absX > absY && absX > absZ) {
+            return diff.x > 0 ? Direction.EAST : Direction.WEST;
+        } else if (absY > absZ) {
+            return diff.y > 0 ? Direction.UP : Direction.DOWN;
+        } else {
+            return diff.z > 0 ? Direction.SOUTH : Direction.NORTH;
+        }
+    }
+
+    private float getMS(BlockState state) {
+        float hardness = state.getHardness(mc.world, null);
+        if (hardness == -1) return 0.0f;
+
+        float speed = mc.player.getBlockBreakingSpeed(state);
+        if (speed > 1.0f) {
+            speed += (speed - 1.0f) * 0.2f;
+        }
+
+        return speed / hardness / 30.0f;
+    }
+}
